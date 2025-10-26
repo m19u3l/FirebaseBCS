@@ -1,0 +1,119 @@
+import express from 'express';
+import db from '../db.js';
+
+const router = express.Router();
+
+// GET all change orders
+router.get('/', async (req, res) => {
+  try {
+    const changeOrders = await db.all(`
+      SELECT co.*, wo.client AS client_id, c.name AS client_name
+      FROM change_orders co
+      LEFT JOIN work_orders wo ON co.work_order = wo.id
+      LEFT JOIN clients c ON wo.client = c.id
+      ORDER BY co.date_created DESC
+    `);
+    res.json(changeOrders);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET single change order
+router.get('/:id', async (req, res) => {
+  try {
+    const changeOrder = await db.get(`
+      SELECT co.*, wo.client AS client_id, c.name AS client_name
+      FROM change_orders co
+      LEFT JOIN work_orders wo ON co.work_order = wo.id
+      LEFT JOIN clients c ON wo.client = c.id
+      WHERE co.id = ?
+    `, req.params.id);
+
+    if (!changeOrder) {
+      return res.status(404).json({ error: 'Change order not found' });
+    }
+
+    res.json(changeOrder);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET change orders for a work order
+router.get('/work-order/:workOrderId', async (req, res) => {
+  try {
+    const changeOrders = await db.all(`
+      SELECT * FROM change_orders WHERE work_order = ? ORDER BY date_created DESC
+    `, req.params.workOrderId);
+    res.json(changeOrders);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// CREATE new change order
+router.post('/', async (req, res) => {
+  try {
+    const { work_order, description, cost_change, status } = req.body;
+
+    if (!work_order) {
+      return res.status(400).json({ error: 'Work order ID is required' });
+    }
+
+    const result = await db.run(`
+      INSERT INTO change_orders (work_order, description, cost_change, status)
+      VALUES (?, ?, ?, ?)
+    `, [work_order, description, cost_change || 0, status || 'Pending']);
+
+    const newChangeOrder = await db.get('SELECT * FROM change_orders WHERE id = ?', result.lastID);
+    res.status(201).json(newChangeOrder);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// UPDATE change order
+router.put('/:id', async (req, res) => {
+  try {
+    const { description, cost_change, status } = req.body;
+    
+    const changeOrder = await db.get('SELECT * FROM change_orders WHERE id = ?', req.params.id);
+    if (!changeOrder) {
+      return res.status(404).json({ error: 'Change order not found' });
+    }
+
+    await db.run(`
+      UPDATE change_orders
+      SET description = ?, cost_change = ?, status = ?
+      WHERE id = ?
+    `, [
+      description || changeOrder.description,
+      cost_change ?? changeOrder.cost_change,
+      status || changeOrder.status,
+      req.params.id
+    ]);
+
+    const updatedChangeOrder = await db.get('SELECT * FROM change_orders WHERE id = ?', req.params.id);
+    res.json(updatedChangeOrder);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE change order
+router.delete('/:id', async (req, res) => {
+  try {
+    const changeOrder = await db.get('SELECT * FROM change_orders WHERE id = ?', req.params.id);
+    if (!changeOrder) {
+      return res.status(404).json({ error: 'Change order not found' });
+    }
+
+    await db.run('DELETE FROM change_orders WHERE id = ?', req.params.id);
+    res.json({ message: 'Change order deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;

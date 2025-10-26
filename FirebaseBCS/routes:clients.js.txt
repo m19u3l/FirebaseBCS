@@ -1,0 +1,97 @@
+import express from 'express';
+import db from '../db.js';
+
+const router = express.Router();
+
+// GET all clients
+router.get('/', async (req, res) => {
+  try {
+    const clients = await db.all('SELECT * FROM clients ORDER BY name');
+    res.json(clients);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET single client
+router.get('/:id', async (req, res) => {
+  try {
+    const client = await db.get('SELECT * FROM clients WHERE id = ?', req.params.id);
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+    res.json(client);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// CREATE new client
+router.post('/', async (req, res) => {
+  try {
+    const { name, email, phone, address, city, state, zip } = req.body;
+    
+    if (!name) {
+      return res.status(400).json({ error: 'Client name is required' });
+    }
+
+    const result = await db.run(`
+      INSERT INTO clients (name, email, phone, address, city, state, zip)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `, [name, email, phone, address, city, state, zip]);
+
+    const newClient = await db.get('SELECT * FROM clients WHERE id = ?', result.lastID);
+    res.status(201).json(newClient);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// UPDATE client
+router.put('/:id', async (req, res) => {
+  try {
+    const { name, email, phone, address, city, state, zip } = req.body;
+    
+    const client = await db.get('SELECT * FROM clients WHERE id = ?', req.params.id);
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    await db.run(`
+      UPDATE clients 
+      SET name = ?, email = ?, phone = ?, address = ?, city = ?, state = ?, zip = ?
+      WHERE id = ?
+    `, [
+      name || client.name,
+      email || client.email,
+      phone || client.phone,
+      address || client.address,
+      city || client.city,
+      state || client.state,
+      zip || client.zip,
+      req.params.id
+    ]);
+
+    const updatedClient = await db.get('SELECT * FROM clients WHERE id = ?', req.params.id);
+    res.json(updatedClient);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE client
+router.delete('/:id', async (req, res) => {
+  try {
+    const client = await db.get('SELECT * FROM clients WHERE id = ?', req.params.id);
+    if (!client) {
+      return res.status(404).json({ error: 'Client not found' });
+    }
+
+    await db.run('DELETE FROM clients WHERE id = ?', req.params.id);
+    res.json({ message: 'Client deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;

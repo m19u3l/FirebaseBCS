@@ -1,0 +1,252 @@
+import express from 'express';
+import db from '../db.js';
+
+const router = express.Router();
+
+// =========================
+// GET all reconstruction projects
+// =========================
+router.get('/', async (req, res) => {
+  try {
+    const projects = await db.all(`
+      SELECT rr.*, wo.client AS client_id, c.name AS client_name
+      FROM remediation_reconstruction rr
+      LEFT JOIN work_orders wo ON rr.work_order_id = wo.id
+      LEFT JOIN clients c ON wo.client = c.id
+      ORDER BY rr.created_at DESC
+    `);
+    res.json(projects);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================
+// GET single reconstruction project with full details
+// =========================
+router.get('/:id', async (req, res) => {
+  try {
+    const project = await db.get(`
+      SELECT rr.*, wo.client AS client_id, c.name AS client_name, c.address, c.phone, c.email
+      FROM remediation_reconstruction rr
+      LEFT JOIN work_orders wo ON rr.work_order_id = wo.id
+      LEFT JOIN clients c ON wo.client = c.id
+      WHERE rr.id = ?
+    `, req.params.id);
+
+    if (!project) {
+      return res.status(404).json({ error: 'Reconstruction project not found' });
+    }
+
+    // Get daily logs
+    const dailyLogs = await db.all(`
+      SELECT * FROM daily_project_logs 
+      WHERE project_id = ? AND project_type = 'reconstruction' 
+      ORDER BY log_date DESC
+    `, req.params.id);
+
+    // Get photos
+    const photos = await db.all(`
+      SELECT * FROM project_photos 
+      WHERE project_id = ? AND project_type = 'reconstruction' 
+      ORDER BY taken_date
+    `, req.params.id);
+
+    // Get linked dryout project if exists
+    let dryoutProject = null;
+    if (project.dryout_id) {
+      dryoutProject = await db.get('SELECT * FROM remediation_dryout WHERE id = ?', project.dryout_id);
+    }
+
+    res.json({
+      project,
+      daily_logs: dailyLogs,
+      photos,
+      dryout_project: dryoutProject
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================
+// CREATE new reconstruction project
+// =========================
+router.post('/', async (req, res) => {
+  try {
+    const {
+      work_order_id,
+      dryout_id,
+      project_number,
+      project_name,
+      project_description,
+      reconstruction_type,
+      insurance_carrier,
+      claim_number,
+      adjuster_name,
+      xactimate_estimate_number
+    } = req.body;
+
+    if (!work_order_id) {
+      return res.status(400).json({ error: 'Work order ID is required' });
+    }
+
+    const result = await db.run(`
+      INSERT INTO remediation_reconstruction (
+        work_order_id, dryout_id, project_number, project_name, project_description,
+        reconstruction_type, insurance_carrier, claim_number, adjuster_name,
+        xactimate_estimate_number, status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Planning')
+    `, [
+      work_order_id,
+      dryout_id || null,
+      project_number || `RECON-${Date.now()}`,
+      project_name,
+      project_description,
+      reconstruction_type || 'Water',
+      insurance_carrier,
+      claim_number,
+      adjuster_name,
+      xactimate_estimate_number
+    ]);
+
+    const newProject = await db.get('SELECT * FROM remediation_reconstruction WHERE id = ?', result.lastID);
+    res.status(201).json(newProject);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================
+// UPDATE reconstruction project (Full scope)
+// =========================
+router.put('/:id', async (req, res) => {
+  try {
+    const project = await db.get('SELECT * FROM remediation_reconstruction WHERE id = ?', req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: 'Reconstruction project not found' });
+    }
+
+    const updates = req.body;
+    const fields = [];
+    const values = [];
+
+    Object.keys(updates).forEach(key => {
+      if (key !== 'id') {
+        fields.push(`${key} = ?`);
+        // Handle JSON fields
+        if (['materials_list', 'labor_breakdown', 'subcontractor_list', 'punch_list', 'paint_color_scheme'].includes(key)) {
+          values.push(typeof updates[key] === 'string' ? updates[key] : JSON.stringify(updates[key]));
+        } else {
+          values.push(updates[key]);
+        }
+      }
+    });
+
+    values.push(req.params.id);
+
+    await db.run(`
+      UPDATE remediation_reconstruction 
+      SET ${fields.join(', ')}, updated_at = datetime('now')
+      WHERE id = ?
+    `, values);
+
+    const updatedProject = await db.get('SELECT * FROM remediation_reconstruction WHERE id = ?', req.params.id);
+    res.json(updatedProject);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// =========================
+// GENERATE COMPREHENSIVE SCOPE OF WORK (Insurance/Xactimate Format)
+// =========================
+router.get('/:id/detailed-scope', async (req, res) => {
+  try {
+    const project = await db.get('SELECT * FROM remediation_reconstruction WHERE id = ?', req.params.id);
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    const scope = {
+      project_info: {
+        project_number: project.project_number,
+        project_name: project.project_name,
+        reconstruction_type: project.reconstruction_type,
+        claim_number: project.claim_number,
+        insurance_carrier: project.insurance_carrier,
+        adjuster: project.adjuster_name,
+        xactimate_estimate: project.xactimate_estimate_number
+      },
+
+      demolition_phase: {
+        status: project.demolition_complete ? 'Complete' : 'Pending',
+        flooring: {
+          carpet: `${project.carpet_demo_sqft || 0} SF @ $${project.carpet_demo_rate || 0}/SF`,
+          pad: `${project.pad_demo_sqft || 0} SF @ $${project.pad_demo_rate || 0}/SF`,
+          tile: `${project.tile_demo_sqft || 0} SF @ $${project.tile_demo_rate || 0}/SF`,
+          hardwood: `${project.hardwood_demo_sqft || 0} SF @ $${project.hardwood_demo_rate || 0}/SF`,
+          laminate: `${project.laminate_demo_sqft || 0} SF @ $${project.laminate_demo_rate || 0}/SF`,
+          vinyl: `${project.vinyl_demo_sqft || 0} SF @ $${project.vinyl_demo_rate || 0}/SF`
+        },
+        walls: {
+          drywall: `${project.drywall_demo_sqft || 0} SF @ $${project.drywall_demo_rate || 0}/SF`,
+          baseboard: `${project.baseboard_demo_lf || 0} LF @ $${project.baseboard_demo_rate || 0}/LF`,
+          crown_molding: `${project.crown_molding_demo_lf || 0} LF @ $${project.crown_molding_demo_rate || 0}/LF`,
+          wainscoting: `${project.wainscoting_demo_sqft || 0} SF`,
+          wall_tile: `${project.wall_tile_demo_sqft || 0} SF`
+        },
+        ceiling: {
+          drywall: `${project.ceiling_drywall_demo_sqft || 0} SF`,
+          texture: `${project.ceiling_texture_demo_sqft || 0} SF`,
+          popcorn: `${project.popcorn_ceiling_demo_sqft || 0} SF`,
+          drop_ceiling: `${project.drop_ceiling_demo_sqft || 0} SF`
+        },
+        cabinetry: {
+          base_cabinets: `${project.base_cabinets_demo_lf || 0} LF`,
+          upper_cabinets: `${project.upper_cabinets_demo_lf || 0} LF`,
+          countertop: `${project.countertop_demo_lf || 0} LF`,
+          vanity: `${project.vanity_demo_qty || 0} units`
+        },
+        plumbing_fixtures: {
+          toilets: project.toilet_demo_qty || 0,
+          sinks: project.sink_demo_qty || 0,
+          faucets: project.faucet_demo_qty || 0,
+          shower_valves: project.shower_valve_demo_qty || 0,
+          tubs: project.tub_demo_qty || 0,
+          water_heaters: project.water_heater_demo_qty || 0
+        },
+        doors_windows: {
+          interior_doors: project.interior_door_demo_qty || 0,
+          exterior_doors: project.exterior_door_demo_qty || 0,
+          windows: project.window_demo_qty || 0,
+          sliding_doors: project.sliding_door_demo_qty || 0
+        },
+        insulation: {
+          batt: `${project.batt_insulation_demo_sqft || 0} SF`,
+          blown: `${project.blown_insulation_demo_sqft || 0} SF`,
+          spray_foam: `${project.spray_foam_demo_sqft || 0} SF`
+        }
+      },
+
+      reconstruction_phase: {
+        status: project.reconstruction_complete ? 'Complete' : 'In Progress',
+        
+        framing_structural: {
+          wall_framing: `${project.wall_framing_lf || 0} LF @ $${project.wall_framing_rate || 0}/LF`,
+          ceiling_framing: `${project.ceiling_framing_sqft || 0} SF`,
+          headers: `${project.headers_installed || 0} installed`,
+          blocking: `${project.blocking_installed_lf || 0} LF`
+        },
+
+        plumbing: {
+          description: project.plumbing_rough_in || 'Standard rough-in',
+          water_lines: `${project.water_lines_installed_lf || 0} LF`,
+          drain_lines: `${project.drain_lines_installed_lf || 0} LF`,
+          fixtures: {
+            toilets: `${project.toilet_install_qty || 0} @ $${project.toilet_cost_ea || 0} each`,
+            sinks: `${project.sink_install_qty || 0} @ $${project.sink_cost_ea || 0} each`,
+            faucets: `${project.faucet_install_qty || 0} @ $${project.faucet_cost_ea || 0} each`,
+            shower_valves: `${project.shower_valve_install_qty || 0} installed`,
+            tubs: `${project.tub_install_qty || 0} installed`,
+            water_heaters: `${project.water_heater_install_qty || 0
